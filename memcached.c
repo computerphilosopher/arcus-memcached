@@ -9304,6 +9304,35 @@ static void process_verbosity_command(conn *c, token_t *tokens, const size_t nto
     }
 }
 
+static void process_persistence_command(conn *c, token_t *tokens, const size_t ntokens)
+{
+    assert(c != NULL);
+
+    if (ntokens == 3) {
+        char buf[50];
+        sprintf(buf, "persistence %s\r\nEND", settings.use_persistence ? "on" : "off");
+        out_string(c, buf);
+    } else if (ntokens == 4) {
+        const char *config = tokens[COMMAND_TOKEN+2].value;
+        SETTING_LOCK();
+        if (strcmp(config, "on") == 0)
+            settings.use_persistence = true;
+        else if (strcmp(config, "off") == 0)
+            settings.use_persistence= false;
+        else {
+            SETTING_UNLOCK();
+            out_string(c, "CLIENT_ERROR bad value");
+            return;
+        }
+        SETTING_UNLOCK();
+        out_string(c, "END");
+
+    } else {
+        print_invalid_command(c, tokens, ntokens);
+        out_string(c, "CLIENT_ERROR bad command line format");
+    }
+}
+
 static void process_config_command(conn *c, token_t *tokens, const size_t ntokens)
 {
     if (ntokens < 3 || ntokens > 4) {
@@ -9348,6 +9377,9 @@ static void process_config_command(conn *c, token_t *tokens, const size_t ntoken
     }
     else if (strcmp(tokens[SUBCOMMAND_TOKEN].value, "verbosity") == 0) {
         process_verbosity_command(c, tokens, ntokens);
+    }
+    else if (strcmp(tokens[SUBCOMMAND_TOKEN].value, "persistence") == 0) {
+        process_persistence_command(c, tokens, ntokens);
     }
     else {
         print_invalid_command(c, tokens, ntokens);
