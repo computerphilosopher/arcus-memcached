@@ -1,3 +1,4 @@
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/c5d9b38633da42ea823ddd9105b59abd)](https://app.codacy.com/app/computerphilosopher/arcus-memcached?utm_source=github.com&utm_medium=referral&utm_content=computerphilosopher/arcus-memcached&utm_campaign=Badge_Grade_Dashboard)
 ## arcus-memcached : Arcus Memory Cache Server [![Build Status](https://travis-ci.org/naver/arcus-memcached.svg?branch=develop)](https://travis-ci.org/naver/arcus-memcached)
 
 Arcus is a memcached-based cache cloud developed by NAVER Corp.
