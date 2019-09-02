@@ -16,7 +16,7 @@ script:
         gem install coveralls-lcov
     fi
   - ./config/autorun.sh
-  - ./configure $COVERAGE_FLAGS
+  - ./configure $COVERAGE_FLAGS --enable-zk-integration
   - make
   - make test
 
