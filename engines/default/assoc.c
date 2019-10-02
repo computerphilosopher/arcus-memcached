@@ -119,8 +119,8 @@ static void redistribute(struct default_engine *engine, unsigned int bucket)
                  assoc->roottable[tabidx].hashtable[bucket] = it;
              }
          }
-         assoc->expand_bucket++;
     }
+    assoc->expand_bucket++;
     if(assoc->expand_bucket == hashsize(assoc->hashpower-1)) {
         logger->log(EXTENSION_LOG_INFO, NULL, "normal expansion end");
     }
