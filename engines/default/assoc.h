@@ -75,6 +75,7 @@ struct assoc {
     /* Number of items in the hash table. */
     unsigned int hash_items;
     unsigned int tot_prefix_items;
+    unsigned int expand_bucket;
 };
 
 /* assoc scan structure */

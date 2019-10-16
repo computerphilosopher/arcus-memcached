@@ -66,6 +66,7 @@ ENGINE_ERROR_CODE assoc_init(struct default_engine *engine)
     assocp->roottable = NULL;
     assocp->infotable = NULL;
     assocp->prefix_hashtable = NULL;
+    assocp->expand_bucket = 0;
 
     assocp->roottable = calloc(assocp->rootsize, sizeof(void *));
     if (assocp->roottable == NULL) {
@@ -146,6 +147,10 @@ static void redistribute(unsigned int bucket)
              }
          }
     }
+    assocp->expand_bucket++;
+    if(assocp->expand_bucket == hashsize(assocp->hashpower-1)) {
+        logger->log(EXTENSION_LOG_INFO, NULL, "expand end");
+    }
     assocp->infotable[bucket].curpower = assocp->rootpower;
 }
 
@@ -201,12 +206,14 @@ static void assoc_expand(void)
         assocp->rootsize *= 2;
     }
     new_hashtable = calloc(assocp->hashsize * table_count, sizeof(void *));
+    logger->log(EXTENSION_LOG_INFO, NULL, "expansion start");
     if (new_hashtable) {
         for (ii=0; ii < table_count; ++ii) {
             assocp->roottable[table_count+ii].hashtable = &new_hashtable[assocp->hashsize*ii];
         }
         assocp->rootpower++;
     }
+    assocp->expand_bucket=0;
 }
 
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */

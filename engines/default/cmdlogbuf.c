@@ -695,7 +695,7 @@ ENGINE_ERROR_CODE cmdlog_buf_init(struct default_engine* engine)
     logbuff->last = -1;
 
     /* log flush request queue init - ring shaped queue */
-    logbuff->fqsz = (logbuff->size / CMDLOG_FLUSH_AUTO_SIZE) * 2;
+    logbuff->fqsz = (logbuff->size / CMDLOG_FLUSH_AUTO_SIZE) * 100;
     logbuff->fque = (log_FREQ*)malloc(logbuff->fqsz * sizeof(log_FREQ));
     if (logbuff->fque == NULL) {
         free(logbuff->data);

@@ -28,7 +28,7 @@
 #include "cmdlogrec.h"
 #endif
 
-#define SNAPSHOT_BUFFER_SIZE (10 * 1024 * 1024)
+#define SNAPSHOT_BUFFER_SIZE (2 * 1024 * 1024)
 #define SCAN_ITEM_ARRAY_SIZE 16
 //#define SCAN_ITEM_ARRAY_SIZE 64
 #define SNAPSHOT_MAX_FILEPATH_LENGTH 255
@@ -500,6 +500,8 @@ static ENGINE_ERROR_CODE do_snapshot_direct(snapshot_st *ss,
 
     ss->running = true;
     pthread_mutex_unlock(&ss->lock);
+
+    logger->log(EXTENSION_LOG_INFO, NULL, "Do the snapshot action.\n");
 
     if (do_snapshot_action(ss) == true) {
         logger->log(EXTENSION_LOG_INFO, NULL, "Done the snapshot action.\n");
