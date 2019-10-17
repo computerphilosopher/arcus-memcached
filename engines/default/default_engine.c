@@ -1642,7 +1642,7 @@ create_instance(uint64_t interface, GET_SERVER_API get_server_api,
       .get_server_api = get_server_api,
       .initialized = true,
       .assoc = {
-         .hashpower = 17, /* (1<<17) => 128K hash size */
+         .hashpower = 27, /* (1<<17) => 128K hash size */
          .tot_prefix_items = 0,
       },
       .slabs = {
