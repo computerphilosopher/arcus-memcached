@@ -149,7 +149,7 @@ static void redistribute(unsigned int bucket)
     }
     assocp->expand_bucket++;
     if(assocp->expand_bucket == hashsize(assocp->hashpower-1)) {
-        logger->log(EXTENSION_LOG_INFO, NULL, "expand end");
+        logger->log(EXTENSION_LOG_INFO, NULL, "expansion end");
     }
     assocp->infotable[bucket].curpower = assocp->rootpower;
 }
