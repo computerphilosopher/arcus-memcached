@@ -33,7 +33,9 @@ struct iovec {
 
 #define ENABLE_PERSISTENCE_01_ITEM_SCAN
 #define ENABLE_PERSISTENCE_02_SNAPSHOT
+#define ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
 #define ENABLE_PERSISTENCE
+#define COLLGET_RESULT
 #define PROXY_SUPPORT
 #define BOP_COUNT_OPTIMIZE
 //#define NEW_PREFIX_STATS_MANAGEMENT
@@ -261,6 +263,16 @@ extern "C" {
         uint32_t elem_arrsz;
         uint32_t elem_count;
     } elems_result_t;
+
+    /* result fields in common for each collection on get operation */
+    struct elems_result {
+        eitem** elem_array; //output variable that will receive the located item
+        uint32_t elem_count; //number of output elements
+        uint32_t access_count; //for b+tree
+        uint32_t flags;
+        bool dropped; //dropped if empty
+        bool trimmed; //trimmed on btree
+    };
 
     /*
      * bkey and eflag

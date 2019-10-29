@@ -373,9 +373,7 @@ extern "C" {
                                            const void* key, const int nkey,
                                            int from_index, int to_index,
                                            const bool delete, const bool drop_if_empty,
-                                           eitem** eitem_array, uint32_t* eitem_count,
-                                           uint32_t* flags, bool* dropped,
-                                           uint16_t vbucket);
+                                           struct elems_result *eresult, uint16_t vbucket);
 
         /*
          * SET Interface
@@ -413,9 +411,7 @@ extern "C" {
                                           const void* key, const int nkey,
                                           const uint32_t count,
                                           const bool delete, const bool drop_if_empty,
-                                          eitem** eitem, uint32_t* eitem_count,
-                                          uint32_t* flags, bool* dropped,
-                                          uint16_t vbucket);
+                                          struct elems_result *eresult, uint16_t vbucket);
 
         /*
          * MAP Interface
@@ -466,19 +462,12 @@ extern "C" {
                                              uint32_t* del_count,
                                              bool *dropped,
                                              uint16_t vbucket);
-        ENGINE_ERROR_CODE (*map_elem_get)(ENGINE_HANDLE* handle,
-                                          const void* cookie,
-                                          const void* key,
-                                          const int nkey,
-                                          const int numfields,
-                                          const field_t *flist,
-                                          const bool delete,
-                                          const bool drop_if_empty,
-                                          eitem** eitem,
-                                          uint32_t* eitem_count,
-                                          uint32_t* flags,
-                                          bool* dropped,
-                                          uint16_t vbucket);
+
+        ENGINE_ERROR_CODE (*map_elem_get)(ENGINE_HANDLE* handle, const void* cookie,
+                                          const void* key, const int nkey,
+                                          const int numfields, const field_t *flist,
+                                          const bool delete, const bool drop_if_empty,
+                                          struct elems_result *eresult, uint16_t vbucket);
 
         /*
          * B+Tree Interface
@@ -531,14 +520,10 @@ extern "C" {
 
         ENGINE_ERROR_CODE (*btree_elem_get)(ENGINE_HANDLE* handle, const void* cookie,
                                             const void* key, const int nkey,
-                                            const bkey_range *bkrange,
-                                            const eflag_filter *efilter,
-                                            const uint32_t offset,
-                                            const uint32_t req_count,
+                                            const bkey_range *bkrange, const eflag_filter *efilter,
+                                            const uint32_t offset, const uint32_t req_count,
                                             const bool delete, const bool drop_if_empty,
-                                            eitem** eitem_array, uint32_t* eitem_count,
-                                            uint32_t* access_count, uint32_t* flags,
-                                            bool* dropped_trimmed, uint16_t vbucket);
+                                            struct elems_result *eresult, uint16_t vbucket);
 
         ENGINE_ERROR_CODE (*btree_elem_count)(ENGINE_HANDLE* handle, const void* cookie,
                                               const void* key, const int nkey,
@@ -692,6 +677,16 @@ extern "C" {
                                   const char *opstr, const char *modestr,
                                   const char *prefix, const int nprefix,
                                   const char *filepath);
+#ifdef ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
+
+        /**
+         * Snapshot all cache items.
+         */
+        ENGINE_ERROR_CODE (*snapshot)(ENGINE_HANDLE* handle, const void *cookie,
+                                      const char *opstr, const char *modestr,
+                                      const char *prefix, const int nprefix,
+                                      const char *filepath);
+#endif
 
         /**
          * Any unknown command will be considered engine specific.

@@ -831,6 +831,17 @@ static void conn_coll_eitem_free(conn *c)
 #if defined(SUPPORT_BOP_MGET) || defined(SUPPORT_BOP_SMGET)
 #ifdef SUPPORT_BOP_MGET
       case OPERATION_BOP_MGET:
+        for (int k = 0; k < c->coll_numkeys; k++) {
+            struct elems_result *eresptr = &((struct elems_result*)c->coll_eitem)[k];
+            if (eresptr->elem_array != NULL) {
+                mc_engine.v1->btree_elem_release(mc_engine.v0, c,
+                                                 eresptr->elem_array, eresptr->elem_count);
+                free(eresptr->elem_array);
+                eresptr->elem_array = NULL;
+            }
+        }
+        free(c->coll_eitem);
+        break;
 #endif
 #ifdef SUPPORT_BOP_SMGET
       case OPERATION_BOP_SMGET:
@@ -2043,32 +2054,19 @@ static void process_mop_delete_complete(conn *c)
 static void process_mop_get_complete(conn *c)
 {
     assert(c->coll_op == OPERATION_MOP_GET);
+    assert(c->ewouldblock == false);
 
     ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
+    struct elems_result eresult;
     eitem **elem_array = NULL;
     field_t *fld_tokens = NULL;
     uint32_t elem_count = 0;
-    uint32_t flags, f;
+    uint32_t f;
     bool delete = c->coll_delete;
     bool drop_if_empty = c->coll_drop;
-    bool dropped;
     int  need_size;
 
-    if (c->coll_numkeys <= 0 || c->coll_numkeys > MAX_MAP_SIZE) {
-        need_size = MAX_MAP_SIZE * sizeof(eitem*);
-    } else {
-        need_size = c->coll_numkeys * sizeof(eitem*);
-    }
-
-    if ((c->coll_eitem = (eitem *)malloc(need_size)) == NULL) {
-        ret = ENGINE_ENOMEM;
-    } else {
-        elem_array = (eitem **)c->coll_eitem;
-    }
-
-    assert(c->ewouldblock == false);
-
-    if (ret == ENGINE_SUCCESS && c->coll_strkeys != NULL) {
+    if (c->coll_strkeys != NULL) {
         fld_tokens = (field_t*)token_buff_get(&c->thread->token_buff, c->coll_numkeys);
         if (fld_tokens != NULL) {
             bool must_backward_compatible = true; /* Must be backward compatible */
@@ -2091,7 +2089,9 @@ static void process_mop_get_complete(conn *c)
     if (ret == ENGINE_SUCCESS) {
         ret = mc_engine.v1->map_elem_get(mc_engine.v0, c, c->coll_key, c->coll_nkey,
                                          c->coll_numkeys, fld_tokens, delete, drop_if_empty,
-                                         elem_array, &elem_count, &flags, &dropped, 0);
+                                         &eresult, 0);
+        elem_array = eresult.elem_array;
+        elem_count = eresult.elem_count;
     }
 
     if (ret == ENGINE_EWOULDBLOCK) {
@@ -2127,7 +2127,7 @@ static void process_mop_get_complete(conn *c)
             }
             respptr = respbuf;
 
-            sprintf(respptr, "VALUE %u %u\r\n", htonl(flags), elem_count);
+            sprintf(respptr, "VALUE %u %u\r\n", htonl(eresult.flags), elem_count);
             if (add_iov(c, respptr, strlen(respptr)) != 0) {
                 ret = ENGINE_ENOMEM; break;
             }
@@ -2146,7 +2146,7 @@ static void process_mop_get_complete(conn *c)
             if (ret == ENGINE_ENOMEM) break;
 
             sprintf(respptr, "%s\r\n",
-                    (delete ? (dropped ? "DELETED_DROPPED" : "DELETED") : "END"));
+                    (delete ? (eresult.dropped ? "DELETED_DROPPED" : "DELETED") : "END"));
             if ((add_iov(c, respptr, strlen(respptr)) != 0) ||
                 (IS_UDP(c->transport) && build_udp_headers(c) != 0)) {
                 ret = ENGINE_ENOMEM; break;
@@ -2164,6 +2164,10 @@ static void process_mop_get_complete(conn *c)
         } else { /* ENGINE_ENOMEM */
             STATS_NOKEY(c, cmd_mop_get);
             mc_engine.v1->map_elem_release(mc_engine.v0, c, elem_array, elem_count);
+            if (elem_array != NULL) {
+                free(elem_array);
+                elem_array = NULL;
+            }
             if (respbuf != NULL)
                 free(respbuf);
             if (c->ewouldblock)
@@ -2204,13 +2208,6 @@ static void process_mop_get_complete(conn *c)
         assert(c->coll_strkeys == (void*)&c->memblist);
         mblck_list_free(&c->thread->mblck_pool, &c->memblist);
         c->coll_strkeys = NULL;
-    }
-
-    if (ret != ENGINE_SUCCESS) {
-        if (c->coll_eitem != NULL) {
-           free((void *)c->coll_eitem);
-           c->coll_eitem = NULL;
-        }
     }
 }
 
@@ -2263,7 +2260,7 @@ static void process_bop_insert_complete(conn *c)
         ret = mc_engine.v1->btree_elem_insert(mc_engine.v0, c, c->coll_key, c->coll_nkey,
                                               c->coll_eitem, replace_if_exist,
                                               c->coll_attrp, &replaced, &created,
-                                              (c->coll_drop ? &trim_result : NULL), 0);
+                                              (c->coll_getrim ? &trim_result : NULL), 0);
         if (ret == ENGINE_EWOULDBLOCK) {
             c->ewouldblock = true;
             ret = ENGINE_SUCCESS;
@@ -2282,7 +2279,7 @@ static void process_bop_insert_complete(conn *c)
         switch (ret) {
         case ENGINE_SUCCESS:
             STATS_HITS(c, bop_insert, c->coll_key, c->coll_nkey);
-            if (c->coll_drop && trim_result.elems != NULL) { /* getrim flag */
+            if (c->coll_getrim && trim_result.elems != NULL) { /* getrim flag */
                 assert(trim_result.count == 1);
                 char  buffer[256];
                 char *respptr = &buffer[0];
@@ -2302,8 +2299,7 @@ static void process_bop_insert_complete(conn *c)
                     (add_iov_einfo_value_all(c, &c->einfo) != 0) ||
                     (add_iov(c, "TRIMMED\r\n", strlen("TRIMMED\r\n")) != 0))
                 {
-                    mc_engine.v1->btree_elem_release(mc_engine.v0, c,
-                                                     &trim_result.elems, trim_result.count);
+                    mc_engine.v1->btree_elem_free(mc_engine.v0, c, trim_result.elems);
                     if (c->ewouldblock)
                         c->ewouldblock = false;
                     out_string(c, "SERVER_ERROR out of memory writing get response");
@@ -2418,7 +2414,7 @@ static void process_bop_mget_complete(conn *c)
     assert(c->coll_eitem != NULL);
 
     ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-    eitem **elem_array = (eitem **)c->coll_eitem;
+    struct elems_result *eresult = (struct elems_result *)c->coll_eitem;
     uint32_t tot_elem_count = 0;
     uint32_t tot_access_count = 0;
     token_t *key_tokens;
@@ -2438,7 +2434,7 @@ static void process_bop_mget_complete(conn *c)
         uint32_t flags, k, e;
         bool trimmed;
         char *resultptr;
-        char *valuestrp = (char*)elem_array + (c->coll_numkeys * c->coll_rcount * sizeof(eitem*));
+        char *valuestrp = (char*)eresult + (c->coll_numkeys * sizeof(struct elems_result));
         int   resultlen;
         int   nvaluestr;
 
@@ -2457,8 +2453,11 @@ static void process_bop_mget_complete(conn *c)
                                                &c->coll_bkrange,
                                                (c->coll_efilter.ncompval==0 ? NULL : &c->coll_efilter),
                                                c->coll_roffset, c->coll_rcount, false, false,
-                                               &elem_array[tot_elem_count], &cur_elem_count,
-                                               &cur_access_count, &flags, &trimmed, 0);
+                                               &eresult[k], 0);
+            cur_elem_count = eresult[k].elem_count;
+            cur_access_count = eresult[k].access_count;
+            flags = eresult[k].flags;
+            trimmed = eresult[k].trimmed;
 
             if (settings.detail_enabled) {
                 stats_prefix_record_bop_get(key_tokens[k].value, key_tokens[k].length,
@@ -2479,7 +2478,7 @@ static void process_bop_mget_complete(conn *c)
 
                 for (e = 0; e < cur_elem_count; e++) {
                     mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_BTREE,
-                                                elem_array[tot_elem_count+e], &c->einfo);
+                                                eresult[k].elem_array[e], &c->einfo);
                     sprintf(resultptr, "ELEMENT ");
                     resultlen = strlen(resultptr);
                     resultlen += make_bop_elem_response(resultptr + resultlen, &c->einfo);
@@ -2546,7 +2545,15 @@ static void process_bop_mget_complete(conn *c)
         if (ret != ENGINE_SUCCESS) {
             /* ENGINE_ENOMEM or ENGINE_DISCONNECT or SEVERE error */
             /* release elements */
-            mc_engine.v1->btree_elem_release(mc_engine.v0, c, elem_array, tot_elem_count);
+            /* In case k == c->coll_numkeys when ret is ENGINE_ENOMEM */
+            for (int e = 0; e <= k && e < c->coll_numkeys; e++) {
+                if (eresult[e].elem_array != NULL) {
+                    mc_engine.v1->btree_elem_release(mc_engine.v0, c,
+                                                     eresult[e].elem_array, eresult[e].elem_count);
+                    free(eresult[e].elem_array);
+                    eresult[e].elem_array = NULL;
+                }
+            }
         }
     }
 
@@ -4734,38 +4741,21 @@ static void process_bin_lop_get(conn *c)
                 (req->message.body.delete ? "true" : "false"));
     }
 
+    struct elems_result eresult;
     eitem  **elem_array = NULL;
     uint32_t elem_count;
     uint32_t flags, i;
-    bool     dropped;
-    int      est_count;
-    int      need_size;
+    ENGINE_ERROR_CODE ret;
 
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-
-    /* adjust list index */
-    if (from_index > MAX_LIST_SIZE)           from_index = MAX_LIST_SIZE;
-    else if (from_index < -(MAX_LIST_SIZE+1)) from_index = -(MAX_LIST_SIZE+1);
-    if (to_index > MAX_LIST_SIZE)             to_index   = MAX_LIST_SIZE;
-    else if (to_index < -(MAX_LIST_SIZE+1))   to_index   = -(MAX_LIST_SIZE+1);
-
-    est_count = MAX_LIST_SIZE;
-    if ((from_index >= 0 && to_index >= 0) || (from_index  < 0 && to_index < 0)) {
-        est_count = (from_index <= to_index ? to_index - from_index + 1
-                                            : from_index - to_index + 1);
-        if (est_count > MAX_LIST_SIZE) est_count = MAX_LIST_SIZE;
-    }
-    need_size = est_count * (sizeof(eitem*)+sizeof(uint32_t));
-    if ((elem_array = (eitem **)malloc(need_size)) == NULL) {
-        write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
-        return;
-    }
     ret = mc_engine.v1->list_elem_get(mc_engine.v0, c, key, nkey,
                                       from_index, to_index,
                                       (bool)req->message.body.delete,
                                       (bool)req->message.body.drop,
-                                      elem_array, &elem_count, &flags, &dropped,
-                                      c->binary_header.request.vbucket);
+                                      &eresult, c->binary_header.request.vbucket);
+    elem_array = eresult.elem_array;
+    elem_count = eresult.elem_count;
+    flags = eresult.flags;
+
     if (ret == ENGINE_EWOULDBLOCK) {
         c->ewouldblock = true;
         ret = ENGINE_SUCCESS;
@@ -4780,45 +4770,60 @@ static void process_bin_lop_get(conn *c)
     case ENGINE_SUCCESS:
         {
         protocol_binary_response_lop_get* rsp = (protocol_binary_response_lop_get*)c->wbuf;
-        uint32_t *vlenptr = (uint32_t *)&elem_array[elem_count];
+        uint32_t *vlenptr;
         uint32_t  bodylen;
 
-        bodylen = sizeof(rsp->message.body) + (elem_count * sizeof(uint32_t));
-        for (i = 0; i < elem_count; i++) {
-            mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_LIST,
-                                        elem_array[i], &c->einfo);
-            bodylen += (c->einfo.nbytes - 2);
-            vlenptr[i] = htonl(c->einfo.nbytes - 2);
-        }
-        add_bin_header(c, 0, sizeof(rsp->message.body), 0, bodylen);
-
-        // add the flags and count
-        rsp->message.body.flags = flags;
-        rsp->message.body.count = htonl(elem_count);
-        add_iov(c, &rsp->message.body, sizeof(rsp->message.body));
-
-        // add value lengths
-        add_iov(c, (char*)vlenptr, elem_count*sizeof(uint32_t));
-
-        /* Add the data without CRLF */
-        for (i = 0; i < elem_count; i++) {
-            mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_LIST,
-                                        elem_array[i], &c->einfo);
-            if (add_iov_einfo_value_some(c, &c->einfo, c->einfo.nbytes - 2) != 0) {
-                ret = ENGINE_ENOMEM; break;
+        do {
+            bodylen = sizeof(rsp->message.body) + (elem_count * sizeof(uint32_t));
+            if ((vlenptr = (uint32_t *)malloc(elem_count * sizeof(uint32_t))) == NULL) {
+                ret = ENGINE_ENOMEM;
+                break;
             }
-        }
+            for (i = 0; i < elem_count; i++) {
+                mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_LIST,
+                                            elem_array[i], &c->einfo);
+                bodylen += (c->einfo.nbytes - 2);
+                vlenptr[i] = htonl(c->einfo.nbytes - 2);
+            }
+            add_bin_header(c, 0, sizeof(rsp->message.body), 0, bodylen);
+
+            // add the flags and count
+            rsp->message.body.flags = flags;
+            rsp->message.body.count = htonl(elem_count);
+            add_iov(c, &rsp->message.body, sizeof(rsp->message.body));
+
+            // add value lengths
+            add_iov(c, (char*)vlenptr, elem_count*sizeof(uint32_t));
+
+            /* Add the data without CRLF */
+            for (i = 0; i < elem_count; i++) {
+                mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_LIST,
+                                            elem_array[i], &c->einfo);
+                if (add_iov_einfo_value_some(c, &c->einfo, c->einfo.nbytes - 2) != 0) {
+                    ret = ENGINE_ENOMEM; break;
+                }
+            }
+        } while(0);
 
         if (ret == ENGINE_SUCCESS) {
             STATS_ELEM_HITS(c, lop_get, key, nkey);
             /* Remember this command so we can garbage collect it later */
             c->coll_eitem  = (void *)elem_array;
             c->coll_ecount = elem_count;
+            c->coll_resps  = (char *)vlenptr;
             c->coll_op     = OPERATION_LOP_GET;
             conn_set_state(c, conn_mwrite);
         } else {
             STATS_NOKEY(c, cmd_lop_get);
             mc_engine.v1->list_elem_release(mc_engine.v0, c, elem_array, elem_count);
+            if (elem_array != NULL) {
+                free(elem_array);
+                elem_array = NULL;
+            }
+            if (vlenptr != NULL) {
+                free(vlenptr);
+                vlenptr = NULL;
+            }
             if (c->ewouldblock)
                 c->ewouldblock = false;
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
@@ -4846,10 +4851,6 @@ static void process_bin_lop_get(conn *c)
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_EBADTYPE, 0);
         else
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_EINTERNAL, 0);
-    }
-
-    if (ret != ENGINE_SUCCESS && elem_array != NULL) {
-        free((void *)elem_array);
     }
 }
 
@@ -5235,26 +5236,20 @@ static void process_bin_sop_get(conn *c)
                 (req->message.body.delete ? "true" : "false"));
     }
 
+    struct elems_result eresult;
     eitem  **elem_array = NULL;
     uint32_t elem_count;
     uint32_t flags, i;
-    bool     dropped;
-    int      need_size;
-
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-
-    if (req_count <= 0 || req_count > MAX_SET_SIZE) req_count = MAX_SET_SIZE;
-    need_size = req_count * (sizeof(eitem*)+sizeof(uint32_t));
-    if ((elem_array = (eitem **)malloc(need_size)) == NULL) {
-        write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
-        return;
-    }
+    ENGINE_ERROR_CODE ret;
 
     ret = mc_engine.v1->set_elem_get(mc_engine.v0, c, key, nkey, req_count,
                                      (bool)req->message.body.delete,
                                      (bool)req->message.body.drop,
-                                     elem_array, &elem_count, &flags, &dropped,
-                                     c->binary_header.request.vbucket);
+                                     &eresult, c->binary_header.request.vbucket);
+    elem_array = eresult.elem_array;
+    elem_count = eresult.elem_count;
+    flags = eresult.flags;
+
     if (ret == ENGINE_EWOULDBLOCK) {
         c->ewouldblock = true;
         ret = ENGINE_SUCCESS;
@@ -5269,45 +5264,60 @@ static void process_bin_sop_get(conn *c)
     case ENGINE_SUCCESS:
         {
         protocol_binary_response_sop_get* rsp = (protocol_binary_response_sop_get*)c->wbuf;
-        uint32_t *vlenptr = (uint32_t *)&elem_array[elem_count];
+        uint32_t *vlenptr;
         uint32_t  bodylen;
 
-        bodylen = sizeof(rsp->message.body) + (elem_count * sizeof(uint32_t));
-        for (i = 0; i < elem_count; i++) {
-            mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_SET,
-                                        elem_array[i], &c->einfo);
-            bodylen += (c->einfo.nbytes - 2);
-            vlenptr[i] = htonl(c->einfo.nbytes - 2);
-        }
-        add_bin_header(c, 0, sizeof(rsp->message.body), 0, bodylen);
-
-        // add the flags and count
-        rsp->message.body.flags = flags;
-        rsp->message.body.count = htonl(elem_count);
-        add_iov(c, &rsp->message.body, sizeof(rsp->message.body));
-
-        // add value lengths
-        add_iov(c, (char*)vlenptr, elem_count*sizeof(uint32_t));
-
-        /* Add the data without CRLF */
-        for (i = 0; i < elem_count; i++) {
-            mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_SET,
-                                        elem_array[i], &c->einfo);
-            if (add_iov_einfo_value_some(c, &c->einfo, c->einfo.nbytes - 2) != 0) {
-                ret = ENGINE_ENOMEM; break;
+        do {
+            bodylen = sizeof(rsp->message.body) + (elem_count * sizeof(uint32_t));
+            if ((vlenptr = (uint32_t*)malloc(elem_count * sizeof(uint32_t))) == NULL) {
+                ret = ENGINE_ENOMEM;
+                break;
             }
-        }
+            for (i = 0; i < elem_count; i++) {
+                mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_SET,
+                                            elem_array[i], &c->einfo);
+                bodylen += (c->einfo.nbytes - 2);
+                vlenptr[i] = htonl(c->einfo.nbytes - 2);
+            }
+            add_bin_header(c, 0, sizeof(rsp->message.body), 0, bodylen);
+
+            // add the flags and count
+            rsp->message.body.flags = flags;
+            rsp->message.body.count = htonl(elem_count);
+            add_iov(c, &rsp->message.body, sizeof(rsp->message.body));
+
+            // add value lengths
+            add_iov(c, (char*)vlenptr, elem_count*sizeof(uint32_t));
+
+            /* Add the data without CRLF */
+            for (i = 0; i < elem_count; i++) {
+                mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_SET,
+                                            elem_array[i], &c->einfo);
+                if (add_iov_einfo_value_some(c, &c->einfo, c->einfo.nbytes - 2) != 0) {
+                    ret = ENGINE_ENOMEM; break;
+                }
+            }
+        } while(0);
 
         if (ret == ENGINE_SUCCESS) {
             STATS_ELEM_HITS(c, sop_get, key, nkey);
             /* Remember this command so we can garbage collect it later */
             c->coll_eitem  = (void *)elem_array;
             c->coll_ecount = elem_count;
+            c->coll_resps  = (char *)vlenptr;
             c->coll_op     = OPERATION_SOP_GET;
             conn_set_state(c, conn_mwrite);
         } else {
             STATS_NOKEY(c, cmd_sop_get);
             mc_engine.v1->set_elem_release(mc_engine.v0, c, elem_array, elem_count);
+            if (elem_array != NULL) {
+                free(elem_array);
+                elem_array = NULL;
+            }
+            if (vlenptr != NULL) {
+                free(vlenptr);
+                vlenptr = NULL;
+            }
             if (c->ewouldblock)
                 c->ewouldblock = false;
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
@@ -5335,10 +5345,6 @@ static void process_bin_sop_get(conn *c)
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_EBADTYPE, 0);
         else
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_EINTERNAL, 0);
-    }
-
-    if (ret != ENGINE_SUCCESS && elem_array != NULL) {
-        free((void *)elem_array);
     }
 }
 
@@ -5885,26 +5891,11 @@ static void process_bin_bop_get(conn *c)
                 (req->message.body.delete ? "true" : "false"));
     }
 
+    struct elems_result eresult;
     eitem  **elem_array = NULL;
     uint32_t elem_count;
-    uint32_t access_count;
     uint32_t flags, i;
-    bool     dropped_trimmed;
-    int      est_count;
-    int      need_size;
-
-    ENGINE_ERROR_CODE ret = ENGINE_SUCCESS;
-
-    est_count = MAX_BTREE_SIZE;
-    if (req->message.body.count > 0 && req->message.body.count < MAX_BTREE_SIZE) {
-        est_count = req->message.body.count;
-        if (est_count % 2) est_count += 1;
-    }
-    need_size = est_count * (sizeof(eitem*)+MAX_BKEY_LENG+MAX_EFLAG_LENG+sizeof(uint32_t));
-    if ((elem_array = (eitem **)malloc(need_size)) == NULL) {
-        write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
-        return;
-    }
+    ENGINE_ERROR_CODE ret;
 
     ret = mc_engine.v1->btree_elem_get(mc_engine.v0, c, key, nkey,
                                        bkrange, efilter,
@@ -5912,9 +5903,11 @@ static void process_bin_bop_get(conn *c)
                                        req->message.body.count,
                                        (bool)req->message.body.delete,
                                        (bool)req->message.body.drop,
-                                       elem_array, &elem_count, &access_count,
-                                       &flags, &dropped_trimmed,
-                                       c->binary_header.request.vbucket);
+                                       &eresult, c->binary_header.request.vbucket);
+    elem_array = eresult.elem_array;
+    elem_count = eresult.elem_count;
+    flags = eresult.flags;
+
     if (ret == ENGINE_EWOULDBLOCK) {
         c->ewouldblock = true;
         ret = ENGINE_SUCCESS;
@@ -5929,49 +5922,63 @@ static void process_bin_bop_get(conn *c)
     case ENGINE_SUCCESS:
         {
         protocol_binary_response_bop_get* rsp = (protocol_binary_response_bop_get*)c->wbuf;
-        uint64_t *bkeyptr = ((elem_count % 2) == 0 /* for 8 byte align */
-                             ? (uint64_t *)&elem_array[elem_count]
-                             : (uint64_t *)&elem_array[elem_count+1]);
-        uint32_t *vlenptr = (uint32_t *)((char*)bkeyptr + (sizeof(uint64_t) * elem_count));
+        uint32_t *bkeyptr;
+        uint32_t *vlenptr;
         uint32_t  bodylen;
 
-        bodylen = sizeof(rsp->message.body) + (elem_count * (sizeof(uint64_t)+sizeof(uint32_t)));
-        for (i = 0; i < elem_count; i++) {
-            mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_BTREE,
-                                        elem_array[i], &c->einfo);
-            bodylen += (c->einfo.nbytes - 2);
-            bkeyptr[i] = htonll(*(uint64_t*)c->einfo.score);
-            vlenptr[i] = htonl(c->einfo.nbytes - 2);
-        }
-        add_bin_header(c, 0, sizeof(rsp->message.body), 0, bodylen);
-
-        // add the flags and count
-        rsp->message.body.flags = flags;
-        rsp->message.body.count = htonl(elem_count);
-        add_iov(c, &rsp->message.body, sizeof(rsp->message.body));
-
-        // add bkey data and value lengths
-        add_iov(c, (char*)bkeyptr, elem_count*(sizeof(uint64_t)+sizeof(uint32_t)));
-
-        /* Add the data without CRLF */
-        for (i = 0; i < elem_count; i++) {
-            mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_BTREE,
-                                        elem_array[i], &c->einfo);
-            if (add_iov_einfo_value_some(c, &c->einfo, c->einfo.nbytes - 2) != 0) {
-                ret = ENGINE_ENOMEM; break;
+        do {
+            bodylen = sizeof(rsp->message.body) + (elem_count * (sizeof(uint64_t)+sizeof(uint32_t)));
+            if ((bkeyptr = (uint32_t *)malloc(elem_count * sizeof(uint64_t)+sizeof(uint32_t))) == NULL) {
+                ret = ENGINE_ENOMEM;
+                break;
             }
-        }
+            vlenptr = (uint32_t *)((char*)bkeyptr + (sizeof(uint64_t) * elem_count));
+            for (i = 0; i < elem_count; i++) {
+                mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_BTREE,
+                                            elem_array[i], &c->einfo);
+                bodylen += (c->einfo.nbytes - 2);
+                bkeyptr[i] = htonll(*(uint64_t*)c->einfo.score);
+                vlenptr[i] = htonl(c->einfo.nbytes - 2);
+            }
+            add_bin_header(c, 0, sizeof(rsp->message.body), 0, bodylen);
+
+            // add the flags and count
+            rsp->message.body.flags = flags;
+            rsp->message.body.count = htonl(elem_count);
+            add_iov(c, &rsp->message.body, sizeof(rsp->message.body));
+
+            // add bkey data and value lengths
+            add_iov(c, (char*)bkeyptr, elem_count*(sizeof(uint64_t)+sizeof(uint32_t)));
+
+            /* Add the data without CRLF */
+            for (i = 0; i < elem_count; i++) {
+                mc_engine.v1->get_elem_info(mc_engine.v0, c, ITEM_TYPE_BTREE,
+                                            elem_array[i], &c->einfo);
+                if (add_iov_einfo_value_some(c, &c->einfo, c->einfo.nbytes - 2) != 0) {
+                    ret = ENGINE_ENOMEM; break;
+                }
+            }
+        } while(0);
 
         if (ret == ENGINE_SUCCESS) {
             STATS_ELEM_HITS(c, bop_get, key, nkey);
             /* Remember this command so we can garbage collect it later */
             c->coll_eitem  = (void *)elem_array;
             c->coll_ecount = elem_count;
+            c->coll_resps  = (char *)bkeyptr;
             c->coll_op     = OPERATION_BOP_GET;
             conn_set_state(c, conn_mwrite);
         } else {
             STATS_NOKEY(c, cmd_bop_get);
             mc_engine.v1->btree_elem_release(mc_engine.v0, c, elem_array, elem_count);
+            if (elem_array != NULL) {
+                free(elem_array);
+                elem_array = NULL;
+            }
+            if (bkeyptr != NULL) {
+                free(bkeyptr);
+                bkeyptr = NULL;
+            }
             if (c->ewouldblock)
                 c->ewouldblock = false;
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
@@ -6004,10 +6011,6 @@ static void process_bin_bop_get(conn *c)
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_EBADBKEY, 0);
         else
             write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_EINTERNAL, 0);
-    }
-
-    if (ret != ENGINE_SUCCESS && elem_array != NULL) {
-        free((void *)elem_array);
     }
 }
 
@@ -9423,7 +9426,8 @@ static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens)
     int  nprefix = -1; /* all prefixes */
 
     /* dump ascii command
-     * dump start key [<prefix>] filepath\r\n
+     * dump start <mode> [<prefix>] filepath\r\n
+     *   <mode> : key
      * dump stop\r\n
      */
     opstr = tokens[1].value;
@@ -9434,12 +9438,12 @@ static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens)
             return;
         }
     } else if (ntokens == 5 || ntokens == 6) {
-        modestr = tokens[2].value;
-        if (memcmp(opstr, "start", 5) != 0 || memcmp(modestr, "key", 3) != 0) {
+        if (memcmp(opstr, "start", 5) != 0) {
             print_invalid_command(c, tokens, ntokens);
             out_string(c, "CLIENT_ERROR bad command line format");
             return;
         }
+        modestr = tokens[2].value;
         if (ntokens == 5) {
             filepath = tokens[3].value;
         } else {
@@ -9477,6 +9481,72 @@ static void process_dump_command(conn *c, token_t *tokens, const size_t ntokens)
         handle_unexpected_errorcode_ascii(c, ret);
     }
 }
+
+#ifdef ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
+static void process_snapshot_command(conn *c, token_t *tokens, const size_t ntokens)
+{
+    char *opstr;
+    char *modestr = NULL;
+    char *filepath = NULL;
+    char *prefix = NULL;
+    int  nprefix = -1; /* all prefixes */
+
+    /* snapshot ascii command
+     * snapshot start <mode> [<prefix>] filepath\r\n
+     * snapshot stop\r\n
+     */
+    opstr = tokens[1].value;
+    if (ntokens == 3) {
+        if (memcmp(opstr, "stop", 4) != 0) {
+            print_invalid_command(c, tokens, ntokens);
+            out_string(c, "CLIENT_ERROR bad command line format");
+            return;
+        }
+    } else if (ntokens == 5 || ntokens == 6) {
+        if (memcmp(opstr, "start", 5) != 0) {
+            print_invalid_command(c, tokens, ntokens);
+            out_string(c, "CLIENT_ERROR bad command line format");
+            return;
+        }
+        modestr = tokens[2].value; /* "key" or "data" */
+        if (ntokens == 5) {
+            filepath = tokens[3].value;
+        } else {
+            prefix = tokens[3].value;
+            nprefix = tokens[3].length;
+            if (nprefix > PREFIX_MAX_LENGTH) {
+                out_string(c, "CLIENT_ERROR too long prefix name");
+                return;
+            }
+            if (nprefix == 6 && strncmp(prefix, "<null>", 6) == 0) {
+                /* snapshot null prefix */
+                prefix = NULL;
+                nprefix = 0;
+            }
+            filepath = tokens[4].value;
+        }
+    } else {
+        print_invalid_command(c, tokens, ntokens);
+        out_string(c, "CLIENT_ERROR bad command line format");
+        return;
+    }
+
+    ENGINE_ERROR_CODE ret;
+    ret = mc_engine.v1->snapshot(mc_engine.v0, c, opstr, modestr,
+                                 prefix, nprefix, filepath);
+    if (ret == ENGINE_SUCCESS) {
+        out_string(c, "OK");
+    } else if (ret == ENGINE_DISCONNECT) {
+        c->state = conn_closing;
+    } else if (ret == ENGINE_ENOTSUP) {
+        out_string(c, "NOT_SUPPORTED");
+    } else if (ret == ENGINE_FAILED) {
+        out_string(c, "SERVER_ERROR failed. refer to the reason in server log.");
+    } else {
+        handle_unexpected_errorcode_ascii(c, ret);
+    }
+}
+#endif
 
 static void process_help_command(conn *c, token_t *tokens, const size_t ntokens)
 {
@@ -9564,6 +9634,9 @@ static void process_help_command(conn *c, token_t *tokens, const size_t ntokens)
         "\t" "stats detail [on|off|dump]\\r\\n" "\n"
         "\t" "stats scrub\\r\\n" "\n"
         "\t" "stats dump\\r\\n" "\n"
+#ifdef ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
+        "\t" "stats snapshot\\r\\n" "\n"
+#endif
         "\t" "stats cachedump <slab_clsid> <limit> [forward|backward [sticky]]\\r\\n" "\n"
         "\t" "stats reset\\r\\n" "\n"
 #ifdef COMMAND_LOGGING
@@ -9580,8 +9653,14 @@ static void process_help_command(conn *c, token_t *tokens, const size_t ntokens)
         "\t" "lqdetect stats\\r\\n" "\n"
 #endif
         "\n"
-        "\t" "dump start key [<prefix>] <filepath>\\r\\n" "\n"
+        "\t" "dump start <mode> [<prefix>] <filepath>\\r\\n" "\n"
+        "\t" "  * <mode> : key" "\n"
         "\t" "dump stop\\r\\n" "\n"
+#ifdef ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
+        "\t" "snapshot start <mode> [<prefix>] <filepath>\\r\\n" "\n"
+        "\t" "  * <mode> : key, data" "\n"
+        "\t" "snapshot stop\\r\\n" "\n"
+#endif
 #ifdef ENABLE_ZK_INTEGRATION
         "\n"
         "\t" "zkensemble set <ensemble_list>\\r\\n" "\n"
@@ -9912,35 +9991,22 @@ static void process_lop_get(conn *c, char *key, size_t nkey,
                             bool delete, bool drop_if_empty)
 {
     assert(c->ewouldblock == false);
+    struct elems_result eresult;
     eitem  **elem_array = NULL;
     uint32_t elem_count;
     uint32_t flags, i;
     bool     dropped;
-    int      est_count;
     int      need_size;
-
-    /* adjust list index */
-    if (from_index > MAX_LIST_SIZE)           from_index = MAX_LIST_SIZE;
-    else if (from_index < -(MAX_LIST_SIZE+1)) from_index = -(MAX_LIST_SIZE+1);
-    if (to_index > MAX_LIST_SIZE)             to_index   = MAX_LIST_SIZE;
-    else if (to_index < -(MAX_LIST_SIZE+1))   to_index   = -(MAX_LIST_SIZE+1);
-
-    est_count = MAX_LIST_SIZE;
-    if ((from_index >= 0 && to_index >= 0) || (from_index < 0 && to_index < 0)) {
-        est_count = (from_index <= to_index ? to_index - from_index + 1
-                                            : from_index - to_index + 1);
-        if (est_count > MAX_LIST_SIZE) est_count = MAX_LIST_SIZE;
-    }
-    need_size = est_count * sizeof(eitem*);
-    if ((elem_array = (eitem **)malloc(need_size)) == NULL) {
-        out_string(c, "SERVER_ERROR out of memory");
-        return;
-    }
-
     ENGINE_ERROR_CODE ret;
+
     ret = mc_engine.v1->list_elem_get(mc_engine.v0, c, key, nkey,
                                       from_index, to_index, delete, drop_if_empty,
-                                      elem_array, &elem_count, &flags, &dropped, 0);
+                                      &eresult, 0);
+    elem_array = eresult.elem_array;
+    elem_count = eresult.elem_count;
+    flags = eresult.flags;
+    dropped = eresult.dropped;
+
     if (ret == ENGINE_EWOULDBLOCK) {
         c->ewouldblock = true;
         ret = ENGINE_SUCCESS;
@@ -10011,6 +10077,10 @@ static void process_lop_get(conn *c, char *key, size_t nkey,
         } else { /* ENGINE_ENOMEM */
             STATS_NOKEY(c, cmd_lop_get);
             mc_engine.v1->list_elem_release(mc_engine.v0, c, elem_array, elem_count);
+            if (elem_array != NULL) {
+                free(elem_array);
+                elem_array = NULL;
+            }
             if (respbuf != NULL)
                 free(respbuf);
             if (c->ewouldblock)
@@ -10037,10 +10107,6 @@ static void process_lop_get(conn *c, char *key, size_t nkey,
         if (ret == ENGINE_EBADTYPE) out_string(c, "TYPE_MISMATCH");
         else if (ret == ENGINE_ENOTSUP) out_string(c, "NOT_SUPPORTED");
         else handle_unexpected_errorcode_ascii(c, ret);
-    }
-
-    if (ret != ENGINE_SUCCESS && elem_array != NULL) {
-        free((void *)elem_array);
     }
 }
 
@@ -10340,24 +10406,23 @@ static void process_sop_get(conn *c, char *key, size_t nkey, uint32_t count,
                             bool delete, bool drop_if_empty)
 {
     assert(c->ewouldblock == false);
+    struct elems_result eresult;
     eitem  **elem_array = NULL;
     uint32_t elem_count;
     uint32_t req_count = count;
     uint32_t flags, i;
     bool     dropped;
     int      need_size;
-
-    if (req_count <= 0 || req_count > MAX_SET_SIZE) req_count = MAX_SET_SIZE;
-    need_size = req_count * sizeof(eitem*);
-    if ((elem_array = (eitem **)malloc(need_size)) == NULL) {
-        out_string(c, "SERVER_ERROR out of memory");
-        return;
-    }
-
     ENGINE_ERROR_CODE ret;
+
     ret = mc_engine.v1->set_elem_get(mc_engine.v0, c, key, nkey,
                                      req_count, delete, drop_if_empty,
-                                     elem_array, &elem_count, &flags, &dropped, 0);
+                                     &eresult, 0);
+    elem_array = eresult.elem_array;
+    elem_count = eresult.elem_count;
+    flags = eresult.flags;
+    dropped = eresult.dropped;
+
     if (ret == ENGINE_EWOULDBLOCK) {
         c->ewouldblock = true;
         ret = ENGINE_SUCCESS;
@@ -10428,6 +10493,10 @@ static void process_sop_get(conn *c, char *key, size_t nkey, uint32_t count,
         } else { /* ENGINE_ENOMEM */
             STATS_NOKEY(c, cmd_sop_get);
             mc_engine.v1->set_elem_release(mc_engine.v0, c, elem_array, elem_count);
+            if (elem_array != NULL) {
+                free(elem_array);
+                elem_array = NULL;
+            }
             if (respbuf != NULL)
                 free(respbuf);
             if (c->ewouldblock)
@@ -10454,10 +10523,6 @@ static void process_sop_get(conn *c, char *key, size_t nkey, uint32_t count,
         if (ret == ENGINE_EBADTYPE) out_string(c, "TYPE_MISMATCH");
         else if (ret == ENGINE_ENOTSUP) out_string(c, "NOT_SUPPORTED");
         else handle_unexpected_errorcode_ascii(c, ret);
-    }
-
-    if (ret != ENGINE_SUCCESS && elem_array != NULL) {
-        free((void *)elem_array);
     }
 }
 
@@ -10729,30 +10794,26 @@ static void process_bop_get(conn *c, char *key, size_t nkey,
                             const bool delete, const bool drop_if_empty)
 {
     assert(c->ewouldblock == false);
+    struct elems_result eresult;
+    bool     dropped;
+    bool     trimmed;
     eitem  **elem_array = NULL;
     uint32_t elem_count;
     uint32_t access_count;
     uint32_t flags, i;
-    bool     dropped_trimmed;
-    int      est_count;
     int      need_size;
-
-    est_count = MAX_BTREE_SIZE;
-    if (count > 0 && count < MAX_BTREE_SIZE) {
-        est_count = count;
-    }
-    need_size = est_count * sizeof(eitem*);
-    if ((elem_array = (eitem **)malloc(need_size)) == NULL) {
-        out_string(c, "SERVER_ERROR out of memory");
-        return;
-    }
-
     ENGINE_ERROR_CODE ret;
+
     ret = mc_engine.v1->btree_elem_get(mc_engine.v0, c, key, nkey,
                                        bkrange, efilter, offset, count,
-                                       delete, drop_if_empty,
-                                       elem_array, &elem_count, &access_count,
-                                       &flags, &dropped_trimmed, 0);
+                                       delete, drop_if_empty, &eresult, 0);
+    elem_array = eresult.elem_array;
+    elem_count = eresult.elem_count;
+    access_count = eresult.access_count;
+    flags = eresult.flags;
+    dropped = eresult.dropped;
+    trimmed = eresult.trimmed;
+
     if (ret == ENGINE_EWOULDBLOCK) {
         c->ewouldblock = true;
         ret = ENGINE_SUCCESS;
@@ -10807,9 +10868,9 @@ static void process_bop_get(conn *c, char *key, size_t nkey,
             if (ret == ENGINE_ENOMEM) break;
 
             if (delete) {
-                sprintf(respptr, "%s\r\n", (dropped_trimmed ? "DELETED_DROPPED" : "DELETED"));
+                sprintf(respptr, "%s\r\n", (dropped ? "DELETED_DROPPED" : "DELETED"));
             } else {
-                sprintf(respptr, "%s\r\n", (dropped_trimmed ? "TRIMMED" : "END"));
+                sprintf(respptr, "%s\r\n", (trimmed ? "TRIMMED" : "END"));
             }
             if ((add_iov(c, respptr, strlen(respptr)) != 0) ||
                 (IS_UDP(c->transport) && build_udp_headers(c) != 0)) {
@@ -10828,6 +10889,10 @@ static void process_bop_get(conn *c, char *key, size_t nkey,
         } else { /* ENGINE_ENOMEM */
             STATS_NOKEY(c, cmd_bop_get);
             mc_engine.v1->btree_elem_release(mc_engine.v0, c, elem_array, elem_count);
+            if (elem_array != NULL) {
+                free(elem_array);
+                elem_array = NULL;
+            }
             if (respbuf != NULL)
                 free(respbuf);
             if (c->ewouldblock)
@@ -10857,10 +10922,6 @@ static void process_bop_get(conn *c, char *key, size_t nkey,
         else if (ret == ENGINE_EBADBKEY) out_string(c, "BKEY_MISMATCH");
         else if (ret == ENGINE_ENOTSUP)  out_string(c, "NOT_SUPPORTED");
         else handle_unexpected_errorcode_ascii(c, ret);
-    }
-
-    if (ret != ENGINE_SUCCESS && elem_array != NULL) {
-        free((void *)elem_array);
     }
 }
 
@@ -11297,11 +11358,11 @@ static void process_bop_prepare_nread_keys(conn *c, int cmd, uint32_t vlen, uint
 #ifdef SUPPORT_BOP_MGET
     if (cmd == OPERATION_BOP_MGET) {
         int bmget_count = c->coll_numkeys * c->coll_rcount;
-        int elem_array_size = bmget_count * sizeof(eitem*);
+        int eresult_array_size = c->coll_numkeys * sizeof(struct elems_result);
         int respon_hdr_size = c->coll_numkeys * ((lenstr_size*2)+30);
         int respon_bdy_size = bmget_count * ((MAX_BKEY_LENG*2+2)+(MAX_EFLAG_LENG*2+2)+lenstr_size+15);
 
-        need_size = elem_array_size + respon_hdr_size + respon_bdy_size;
+        need_size = eresult_array_size + respon_hdr_size + respon_bdy_size;
     }
 #endif
 #ifdef SUPPORT_BOP_SMGET
@@ -12126,15 +12187,14 @@ static void process_bop_command(conn *c, token_t *tokens, const size_t ntokens)
 
         set_pipe_noreply_maybe(c, tokens, ntokens);
 
-        /* [NOTE] c->coll_drop is also used as getrim flag in bop insert/upsert */
-        c->coll_drop = false;
+        c->coll_getrim = false;
         if (c->noreply == false) {
             if (strcmp(tokens[ntokens-2].value, "getrim") == 0) {
                 /* The getrim flag in bop insert/upsert command
                  * If an element is trimmed by maxcount overflow,
                  * the trimmed element must be gotten by clients.
                  */
-                c->coll_drop = true;
+                c->coll_getrim = true;
             }
         }
 
@@ -12166,7 +12226,7 @@ static void process_bop_command(conn *c, token_t *tokens, const size_t ntokens)
         vlen += 2;
         read_ntokens += 1;
 
-        int post_ntokens = 1 + ((c->noreply || c->coll_drop) ? 1 : 0);
+        int post_ntokens = 1 + ((c->noreply || c->coll_getrim) ? 1 : 0);
         int rest_ntokens = ntokens - read_ntokens - post_ntokens;
 
         if (rest_ntokens >= 2) {
@@ -13169,6 +13229,12 @@ static void process_command(conn *c, char *command, int cmdlen)
     {
         process_dump_command(c, tokens, ntokens);
     }
+#ifdef ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
+    else if ((ntokens >= 3) && (strcmp(tokens[COMMAND_TOKEN].value, "snapshot") == 0))
+    {
+        process_snapshot_command(c, tokens, ntokens);
+    }
+#endif
     else if ((ntokens == 2) && (strcmp(tokens[COMMAND_TOKEN].value, "quit") == 0))
     {
         STATS_LOCK();
@@ -15704,10 +15770,16 @@ int main (int argc, char **argv)
     /* initialize main thread libevent instance */
     main_base = event_init();
 
-    /* Load the storage engine */
+    /* initialize other stuff */
+    stats_init();
+
+    /* initialize clock event */
+    clock_handler(0, 0, 0);
+
+    /* load and initialize the storage engine */
     ENGINE_HANDLE *engine_handle = NULL;
     if (!load_engine(engine, get_server_api, mc_logger, &engine_handle)) {
-        /* Error already reported */
+        /* error already reported */
         exit(EXIT_FAILURE);
     }
 
@@ -15719,9 +15791,6 @@ int main (int argc, char **argv)
         log_engine_details(engine_handle, mc_logger);
     }
     mc_engine.v1 = (ENGINE_HANDLE_V1 *) engine_handle;
-
-    /* initialize other stuff */
-    stats_init();
 
     if (!(conn_cache = cache_create("conn", sizeof(conn), sizeof(void*),
                                     conn_constructor, conn_destructor))) {
@@ -15745,12 +15814,12 @@ int main (int argc, char **argv)
 #endif
 
 #ifdef COMMAND_LOGGING
-    /* initialise command logging */
+    /* initialize command logging */
     cmdlog_init(settings.port, mc_logger);
 #endif
 
 #ifdef DETECT_LONG_QUERY
-    /* initialise long query detection */
+    /* initialize long query detection */
     if (lqdetect_init() == -1) {
         mc_logger->log(EXTENSION_LOG_WARNING, NULL,
                 "Can't allocate long query detection buffer\n");
@@ -15760,9 +15829,6 @@ int main (int argc, char **argv)
 
     /* start up worker threads if MT mode */
     thread_init(settings.num_threads, main_base);
-
-    /* initialise clock event */
-    clock_handler(0, 0, 0);
 
     /* create unix mode sockets after dropping privileges */
     if (settings.socketpath != NULL) {

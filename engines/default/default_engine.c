@@ -357,7 +357,7 @@ default_item_delete(ENGINE_HANDLE* handle, const void* cookie,
     VBUCKET_GUARD(engine, vbucket);
 
     ACTION_BEFORE_WRITE(cookie, key, nkey);
-    ret = item_delete(key, nkey, cas);
+    ret = item_delete(key, nkey, cas, cookie);
     ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -419,8 +419,8 @@ default_arithmetic(ENGINE_HANDLE* handle, const void* cookie,
     VBUCKET_GUARD(engine, vbucket);
 
     ACTION_BEFORE_WRITE(cookie, key, nkey);
-    ret = item_arithmetic(cookie, key, nkey, increment, create,
-                          delta, initial, flags, exptime, cas, result);
+    ret = item_arithmetic(key, nkey, increment, create,
+                          delta, initial, flags, exptime, cas, result, cookie);
     ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -518,7 +518,7 @@ default_list_elem_delete(ENGINE_HANDLE* handle, const void* cookie,
 
     ACTION_BEFORE_WRITE(cookie, key, nkey);
     ret = list_elem_delete(key, nkey, from_index, to_index, drop_if_empty,
-                           del_count, dropped);
+                           del_count, dropped, cookie);
     ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -528,8 +528,7 @@ default_list_elem_get(ENGINE_HANDLE* handle, const void* cookie,
                       const void* key, const int nkey,
                       int from_index, int to_index,
                       const bool delete, const bool drop_if_empty,
-                      eitem** eitem_array, uint32_t* eitem_count,
-                      uint32_t* flags, bool* dropped, uint16_t vbucket)
+                      struct elems_result *eresult, uint16_t vbucket)
 {
     struct default_engine *engine = get_handle(handle);
     ENGINE_ERROR_CODE ret;
@@ -537,8 +536,7 @@ default_list_elem_get(ENGINE_HANDLE* handle, const void* cookie,
 
     if (delete) ACTION_BEFORE_WRITE(cookie, key, nkey);
     ret = list_elem_get(key, nkey, from_index, to_index, delete, drop_if_empty,
-                        (list_elem_item**)eitem_array, eitem_count,
-                        flags, dropped);
+                        eresult, cookie);
     if (delete) ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -624,7 +622,7 @@ default_set_elem_delete(ENGINE_HANDLE* handle, const void* cookie,
 
     ACTION_BEFORE_WRITE(cookie, key, nkey);
     ret = set_elem_delete(key, nkey, value, nbytes,
-                          drop_if_empty, dropped);
+                          drop_if_empty, dropped, cookie);
     ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -645,10 +643,10 @@ default_set_elem_exist(ENGINE_HANDLE* handle, const void* cookie,
 
 static ENGINE_ERROR_CODE
 default_set_elem_get(ENGINE_HANDLE* handle, const void* cookie,
-                     const void* key, const int nkey, const uint32_t count,
+                     const void* key, const int nkey,
+                     const uint32_t count,
                      const bool delete, const bool drop_if_empty,
-                     eitem** eitem, uint32_t* eitem_count,
-                     uint32_t* flags, bool* dropped, uint16_t vbucket)
+                     struct elems_result *eresult, uint16_t vbucket)
 {
     struct default_engine *engine = get_handle(handle);
     ENGINE_ERROR_CODE ret;
@@ -656,7 +654,7 @@ default_set_elem_get(ENGINE_HANDLE* handle, const void* cookie,
 
     if (delete) ACTION_BEFORE_WRITE(cookie, key, nkey);
     ret = set_elem_get(key, nkey, count, delete, drop_if_empty,
-                       (set_elem_item**)eitem, eitem_count, flags, dropped);
+                       eresult, cookie);
     if (delete) ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -755,17 +753,18 @@ default_map_elem_delete(ENGINE_HANDLE* handle, const void* cookie,
     VBUCKET_GUARD(engine, vbucket);
 
     ACTION_BEFORE_WRITE(cookie, key, nkey);
-    ret = map_elem_delete(key, nkey, numfields, flist, drop_if_empty, del_count, dropped);
+    ret = map_elem_delete(key, nkey, numfields, flist, drop_if_empty, del_count,
+                          dropped, cookie);
     ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
 
 static ENGINE_ERROR_CODE
 default_map_elem_get(ENGINE_HANDLE* handle, const void* cookie,
-                     const void* key, const int nkey, const int numfields,
-                     const field_t *flist, const bool delete, const bool drop_if_empty,
-                     eitem** eitem, uint32_t* eitem_count, uint32_t* flags,
-                     bool* dropped, uint16_t vbucket)
+                     const void* key, const int nkey,
+                     const int numfields, const field_t *flist,
+                     const bool delete, const bool drop_if_empty,
+                     struct elems_result *eresult, uint16_t vbucket)
 {
     struct default_engine *engine = get_handle(handle);
     ENGINE_ERROR_CODE ret;
@@ -773,7 +772,7 @@ default_map_elem_get(ENGINE_HANDLE* handle, const void* cookie,
 
     if (delete) ACTION_BEFORE_WRITE(cookie, key, nkey);
     ret = map_elem_get(key, nkey, numfields, flist, delete, drop_if_empty,
-                       (map_elem_item**)eitem, eitem_count, flags, dropped);
+                       eresult, cookie);
     if (delete) ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -893,7 +892,7 @@ default_btree_elem_delete(ENGINE_HANDLE* handle, const void* cookie,
 
     ACTION_BEFORE_WRITE(cookie, key, nkey);
     ret = btree_elem_delete(key, nkey, bkrange, efilter, req_count,
-                            drop_if_empty, del_count, access_count, dropped);
+                            drop_if_empty, del_count, access_count, dropped, cookie);
     ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -924,19 +923,15 @@ default_btree_elem_get(ENGINE_HANDLE* handle, const void* cookie,
                        const bkey_range *bkrange, const eflag_filter *efilter,
                        const uint32_t offset, const uint32_t req_count,
                        const bool delete, const bool drop_if_empty,
-                       eitem** eitem_array, uint32_t* eitem_count,
-                       uint32_t *access_count, uint32_t* flags,
-                       bool* dropped_trimmed, uint16_t vbucket)
+                       struct elems_result *eresult, uint16_t vbucket)
 {
     struct default_engine *engine = get_handle(handle);
     ENGINE_ERROR_CODE ret;
     VBUCKET_GUARD(engine, vbucket);
 
     if (delete) ACTION_BEFORE_WRITE(cookie, key, nkey);
-    ret = btree_elem_get(key, nkey, bkrange, efilter,
-                         offset, req_count, delete, drop_if_empty,
-                         (btree_elem_item**)eitem_array, eitem_count,
-                         access_count, flags, dropped_trimmed);
+    ret = btree_elem_get(key, nkey, bkrange, efilter, offset, req_count,
+                         delete, drop_if_empty, eresult, cookie);
     if (delete) ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -1090,7 +1085,7 @@ default_setattr(ENGINE_HANDLE* handle, const void* cookie,
     VBUCKET_GUARD(engine, vbucket);
 
     ACTION_BEFORE_WRITE(cookie, key, nkey);
-    ret = item_setattr(key, nkey, attr_ids, attr_count, attr_data);
+    ret = item_setattr(key, nkey, attr_ids, attr_count, attr_data, cookie);
     ACTION_AFTER_WRITE(cookie, ret);
     return ret;
 }
@@ -1140,6 +1135,11 @@ default_get_stats(ENGINE_HANDLE* handle, const void* cookie,
     else if (strncmp(stat_key, "dump", 4) == 0) {
         item_stats_dump(engine, add_stat, cookie);
     }
+#ifdef ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
+    else if (strncmp(stat_key, "snapshot", 8) == 0) {
+        mc_snapshot_stats(add_stat, cookie);
+    }
+#endif
     else {
         ret = ENGINE_KEY_ENOENT;
     }
@@ -1185,21 +1185,49 @@ default_dump(ENGINE_HANDLE* handle, const void* cookie,
     struct default_engine* engine = get_handle(handle);
 
     if (memcmp(opstr, "start", 5) == 0) {
-        if (memcmp(modestr, "key", 3) != 0) {
+        enum dump_mode mode;
+        if (memcmp(modestr, "key", 3) == 0) {
+            mode = DUMP_MODE_KEY;
+        } else {
             return ENGINE_ENOTSUP;
         }
-        if (item_start_dump(engine, DUMP_MODE_KEY, prefix, nprefix, filepath) != 0) {
-            return ENGINE_FAILED;
-        }
+        return item_start_dump(engine, mode, prefix, nprefix, filepath);
     }
-    else if (memcmp(opstr, "stop", 4) == 0) {
+
+    if (memcmp(opstr, "stop", 4) == 0) {
         item_stop_dump(engine);
-    }
-    else {
+        return ENGINE_SUCCESS;
+    } else {
         return ENGINE_ENOTSUP;
     }
-    return ENGINE_SUCCESS;
 }
+
+#ifdef ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
+static ENGINE_ERROR_CODE
+default_snapshot(ENGINE_HANDLE* handle, const void* cookie,
+                 const char *opstr, const char *modestr,
+                 const char *prefix, const int nprefix, const char *filepath)
+{
+    if (memcmp(opstr, "start", 5) == 0) {
+        enum mc_snapshot_mode mode;
+        if (memcmp(modestr, "key", 3) == 0) {
+            mode = MC_SNAPSHOT_MODE_KEY;
+        } else if (memcmp(modestr, "data", 4) == 0) {
+            mode = MC_SNAPSHOT_MODE_DATA;
+        } else {
+            return ENGINE_ENOTSUP;
+        }
+        return mc_snapshot_start(mode, prefix, nprefix, filepath);
+    }
+
+    if (memcmp(opstr, "stop", 4) == 0) {
+        mc_snapshot_stop();
+        return ENGINE_SUCCESS;
+    } else {
+        return ENGINE_ENOTSUP;
+    }
+}
+#endif
 
 /*
  * Config API
@@ -1628,6 +1656,9 @@ create_instance(uint64_t interface, GET_SERVER_API get_server_api,
          /* Dump API */
          .cachedump        = default_cachedump,
          .dump             = default_dump,
+#ifdef ENABLE_PERSISTENCE_02_SNAPSHOT_COMMAND
+         .snapshot         = default_snapshot,
+#endif
          /* Config API */
          .set_config       = default_set_config,
          /* Unknown Command API */
