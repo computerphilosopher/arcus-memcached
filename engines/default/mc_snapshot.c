@@ -62,6 +62,7 @@ typedef struct _snapshot_st {
    int      nprefix;    /* prefix name length */
    struct snapshot_file   file;
    struct snapshot_buffer buffer;
+   volatile bool initialized;
 } snapshot_st;
 
 /* global data */
@@ -431,9 +432,9 @@ static bool do_snapshot_action(snapshot_st *ss)
                     "Failed to get item scan resource.\n");
         goto done;
     }
-    while (engine->initialized) {
+    while (1) {
         if (ss->reqstop) {
-            logger->log(EXTENSION_LOG_INFO, NULL, "Stop the current snapshot.\n");
+            logger->log(EXTENSION_LOG_INFO, NULL, "Ongoing snapshot recognized stop request.\n");
             break;
         }
         item_count = itscan_getnext(shandle, item_array, erst_array, item_arrsz);
@@ -572,6 +573,10 @@ static ENGINE_ERROR_CODE do_snapshot_start(snapshot_st *ss,
 
 static void do_snapshot_stop(snapshot_st *ss, bool wait_stop)
 {
+    if (!ss->running || ss->mode == MC_SNAPSHOT_MODE_CHKPT) {
+        return;
+    }
+
     while (ss->running) {
         ss->reqstop = true; /* request to stop the snapshot */
 
@@ -583,6 +588,7 @@ static void do_snapshot_stop(snapshot_st *ss, bool wait_stop)
             break;
         }
     }
+    logger->log(EXTENSION_LOG_INFO, NULL, "Snapshot thread stopped.\n");
 }
 
 static void do_snapshot_stats(snapshot_st *ss, ADD_STAT add_stat, const void *cookie)
@@ -629,15 +635,21 @@ ENGINE_ERROR_CODE mc_snapshot_init(struct default_engine *engine)
     if (do_snapshot_init(&snapshot_anch, engine) < 0) {
         return ENGINE_FAILED;
     }
+    snapshot_anch.initialized = true;
     logger->log(EXTENSION_LOG_INFO, NULL, "SNAPSHOT module initialized.\n");
     return ENGINE_SUCCESS;
 }
 
 void mc_snapshot_final(void)
 {
+    if (snapshot_anch.initialized == false) {
+        return;
+    }
+
     mc_snapshot_stop();
 
     do_snapshot_final(&snapshot_anch);
+    snapshot_anch.initialized = false;
     logger->log(EXTENSION_LOG_INFO, NULL, "SNAPSHOT module destroyed.\n");
 }
 
