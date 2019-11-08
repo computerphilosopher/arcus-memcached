@@ -29,8 +29,8 @@
 
 /* FIXME: config log buffer size */
 #define CMDLOG_BUFFER_SIZE (100 * 1024 * 1024) /* 100 MB */
-#define CMDLOG_FLUSH_AUTO_SIZE (64 * 1024) /* 64 KB */
-
+#define CMDLOG_FLUSH_AUTO_SIZE (32 * 1024) /* 32 KB : see the nflush data type of log_FREQ */
+#define CMDLOG_RECORD_MIN_SIZE 16          /* 8 bytes header + 8 bytes body */
 #define CMDLOG_MAX_FILEPATH_LENGTH 255
 
 #define ENABLE_DEBUG 0
@@ -47,8 +47,9 @@ typedef struct _log_file {
 
 /* flush request structure */
 typedef struct _log_freq {
-    uint32_t  nflush;     /* amount of log buffer to flush */
-    bool      dual_write; /* flag of dual write */
+    uint16_t  nflush;     /* amount of log buffer to flush */
+    uint8_t   dual_write; /* flag of dual write */
+    uint8_t   unused;
 } log_FREQ;
 
 /* log buffer structure */
@@ -87,13 +88,9 @@ struct log_global {
     LogSN           nxt_fsync_lsn;
     pthread_mutex_t log_write_lock;
     pthread_mutex_t log_flush_lock;
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
     pthread_mutex_t log_fsync_lock;
-#endif
     pthread_mutex_t flush_lsn_lock;
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
     pthread_mutex_t fsync_lsn_lock;
-#endif
     volatile bool   initialized;
 };
 
@@ -167,7 +164,6 @@ static void do_log_flusher_wakeup(log_FLUSHER *flusher)
     pthread_mutex_unlock(&flusher->lock);
 }
 
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
 static void do_log_file_sync(int fd, bool close)
 {
     int ret = disk_fsync(fd);
@@ -190,7 +186,6 @@ static void do_log_file_sync(int fd, bool close)
         assert(ret == 0);
     }
 }
-#endif
 
 static void do_log_file_write(char *log_ptr, uint32_t log_size, bool dual_write)
 {
@@ -306,15 +301,14 @@ static void do_log_buff_write(LogRec *logrec, log_waiter_t *waiter, bool dual_wr
 {
     log_BUFFER *logbuff = &log_gl.log_buffer;
     uint32_t total_length = sizeof(LogHdr) + logrec->header.body_length;
+    uint32_t spare_length;
     assert(total_length < logbuff->size);
 
     pthread_mutex_lock(&log_gl.log_write_lock);
 
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
     if (waiter != NULL) {
         waiter->lsn = log_gl.nxt_write_lsn;
     }
-#endif
 
     /* find the positon to write in log buffer */
     while (1) {
@@ -330,7 +324,6 @@ static void do_log_buff_write(LogRec *logrec, log_waiter_t *waiter, bool dual_wr
                 /* increase log flush end pointer
                  * to make to-be-flushed log data contiguous in memory.
                  */
-                /* TODO: ensure flush request not full */
                 if (logbuff->fque[logbuff->fend].nflush > 0) {
                     if ((++logbuff->fend) == logbuff->fqsz) logbuff->fend = 0;
                 }
@@ -360,27 +353,22 @@ static void do_log_buff_write(LogRec *logrec, log_waiter_t *waiter, bool dual_wr
     log_gl.nxt_write_lsn.roffset += total_length;
 
     /* update log flush reqeust */
-    if (logbuff->fque[logbuff->fend].nflush == 0) {
-        logbuff->fque[logbuff->fend].nflush = total_length;
-        logbuff->fque[logbuff->fend].dual_write = dual_write;
-    } else {
-        /* TODO: ensure flush request not full */
-        if (logbuff->fque[logbuff->fend].dual_write != dual_write) {
-            if ((++logbuff->fend) == logbuff->fqsz) logbuff->fend = 0;
-        }
-        logbuff->fque[logbuff->fend].nflush += total_length;
-        logbuff->fque[logbuff->fend].dual_write = dual_write;
-    }
-    if (logbuff->fque[logbuff->fend].nflush > CMDLOG_FLUSH_AUTO_SIZE) {
+    if (logbuff->fque[logbuff->fend].nflush > 0 &&
+        logbuff->fque[logbuff->fend].dual_write != dual_write) {
         if ((++logbuff->fend) == logbuff->fqsz) logbuff->fend = 0;
     }
+    while (total_length > 0) {
+        /* check remain length */
+        spare_length = CMDLOG_FLUSH_AUTO_SIZE - logbuff->fque[logbuff->fend].nflush;
+        if (spare_length >= total_length) spare_length = total_length;
 
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
-#else
-    if (waiter != NULL) {
-        waiter->lsn = log_gl.nxt_write_lsn;
+        logbuff->fque[logbuff->fend].nflush += spare_length;
+        logbuff->fque[logbuff->fend].dual_write = dual_write;
+        if (logbuff->fque[logbuff->fend].nflush == CMDLOG_FLUSH_AUTO_SIZE) {
+            if ((++logbuff->fend) == logbuff->fqsz) logbuff->fend = 0;
+        }
+        total_length -= spare_length;
     }
-#endif
 
     pthread_mutex_unlock(&log_gl.log_write_lock);
 
@@ -434,7 +422,6 @@ static void *log_flush_thread_main(void *arg)
 /*
  * External Functions
  */
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
 void log_file_sync(void)
 {
     LogSN now_flush_lsn;
@@ -458,14 +445,7 @@ void log_file_sync(void)
     }
     pthread_mutex_unlock(&log_gl.log_fsync_lock);
 }
-#else
-void log_file_sync(LogSN *prev_flush_lsn)
-{
-    /* TODO: file sync and update nxt_fsync_lsn with log_fsync_lock and fsync_lsn_lock */
-}
-#endif
 
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
 void log_buffer_flush(LogSN *upto_lsn)
 {
     assert(upto_lsn);
@@ -485,7 +465,6 @@ void log_buffer_flush(LogSN *upto_lsn)
         pthread_mutex_unlock(&log_gl.log_flush_lock);
     } while (nflush > 0);
 }
-#endif
 
 void log_record_write(LogRec *logrec, log_waiter_t *waiter, bool dual_write)
 {
@@ -512,13 +491,9 @@ void log_get_flush_lsn(LogSN *lsn)
 
 void log_get_fsync_lsn(LogSN *lsn)
 {
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
     pthread_mutex_lock(&log_gl.fsync_lsn_lock);
-#endif
     *lsn = log_gl.nxt_fsync_lsn;
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
     pthread_mutex_unlock(&log_gl.fsync_lsn_lock);
-#endif
 }
 
 void cmdlog_complete_dual_write(bool success)
@@ -549,15 +524,11 @@ void cmdlog_complete_dual_write(bool success)
             pthread_mutex_unlock(&log_gl.log_write_lock);
 
             assert(log_gl.log_file.prev_fd == -1);
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
             pthread_mutex_lock(&log_gl.log_fsync_lock);
-#endif
             log_gl.log_file.prev_fd = log_gl.log_file.fd;
             log_gl.log_file.fd      = log_gl.log_file.next_fd;
             log_gl.log_file.next_fd = -1;
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
             pthread_mutex_unlock(&log_gl.log_fsync_lock);
-#endif
             log_gl.log_file.size = log_gl.log_file.next_size;
             log_gl.log_file.next_size = 0;
         } else {
@@ -573,14 +544,10 @@ void cmdlog_complete_dual_write(bool success)
             pthread_mutex_unlock(&log_gl.log_write_lock);
 
             assert(log_gl.log_file.prev_fd == -1);
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
             pthread_mutex_lock(&log_gl.log_fsync_lock);
-#endif
             log_gl.log_file.prev_fd = log_gl.log_file.next_fd;
             log_gl.log_file.next_fd = -1;
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
             pthread_mutex_unlock(&log_gl.log_fsync_lock);
-#endif
             log_gl.log_file.next_size = 0;
         }
     } while(0);
@@ -604,18 +571,14 @@ int cmdlog_file_open(char *path)
             break;
         }
         snprintf(logfile->path, CMDLOG_MAX_FILEPATH_LENGTH, "%s", path);
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
         pthread_mutex_lock(&log_gl.log_fsync_lock);
-#endif
         if (logfile->fd == -1) {
             logfile->fd = fd;
         } else {
             /* fd != -1 means that a new cmdlog file is created by checkpoint */
             logfile->next_fd = fd;
         }
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
         pthread_mutex_unlock(&log_gl.log_fsync_lock);
-#endif
     } while(0);
     pthread_mutex_unlock(&log_gl.log_flush_lock);
 
@@ -628,29 +591,21 @@ void cmdlog_file_close(bool shutdown)
 
     pthread_mutex_lock(&log_gl.log_flush_lock);
     if (logfile->next_fd != -1) {
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
         pthread_mutex_lock(&log_gl.log_fsync_lock);
-#endif
         (void)disk_close(logfile->next_fd);
         logfile->next_fd = -1;
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
         pthread_mutex_unlock(&log_gl.log_fsync_lock);
-#endif
     }
     if (logfile->prev_fd != -1) {
         (void)disk_close(logfile->prev_fd);
         logfile->prev_fd = -1;
     }
     if (shutdown && logfile->fd != -1) {
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
         pthread_mutex_lock(&log_gl.log_fsync_lock);
-#endif
         (void)disk_fsync(logfile->fd);
         (void)disk_close(logfile->fd);
         logfile->fd = -1;
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
         pthread_mutex_unlock(&log_gl.log_fsync_lock);
-#endif
     }
     pthread_mutex_unlock(&log_gl.log_flush_lock);
 }
@@ -765,26 +720,16 @@ ENGINE_ERROR_CODE cmdlog_buf_init(struct default_engine* engine)
     memset(&log_gl, 0, sizeof(log_gl));
 
     /* log global init */
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
     log_gl.nxt_fsync_lsn.filenum = 1;
     log_gl.nxt_fsync_lsn.roffset = 0;
     log_gl.nxt_flush_lsn = log_gl.nxt_fsync_lsn;
     log_gl.nxt_write_lsn = log_gl.nxt_fsync_lsn;
-#else
-    LOGSN_SET_NULL(&log_gl.nxt_write_lsn);
-    LOGSN_SET_NULL(&log_gl.nxt_flush_lsn);
-    LOGSN_SET_NULL(&log_gl.nxt_fsync_lsn);
-#endif
 
     pthread_mutex_init(&log_gl.log_write_lock, NULL);
     pthread_mutex_init(&log_gl.log_flush_lock, NULL);
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
     pthread_mutex_init(&log_gl.log_fsync_lock, NULL);
-#endif
     pthread_mutex_init(&log_gl.flush_lsn_lock, NULL);
-#ifdef ENABLE_PERSISTENCE_03_SYNC_LOGGING
     pthread_mutex_init(&log_gl.fsync_lsn_lock, NULL);
-#endif
 
     /* log file init */
     log_FILE *logfile = &log_gl.log_file;
@@ -808,7 +753,7 @@ ENGINE_ERROR_CODE cmdlog_buf_init(struct default_engine* engine)
     logbuff->last = -1;
 
     /* log flush request queue init - ring shaped queue */
-    logbuff->fqsz = (logbuff->size / CMDLOG_FLUSH_AUTO_SIZE) * 100;
+    logbuff->fqsz = (logbuff->size / CMDLOG_RECORD_MIN_SIZE);
     logbuff->fque = (log_FREQ*)malloc(logbuff->fqsz * sizeof(log_FREQ));
     if (logbuff->fque == NULL) {
         free(logbuff->data);
