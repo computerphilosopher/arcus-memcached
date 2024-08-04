@@ -1,4 +1,5 @@
 ## arcus-memcached : Arcus Memory Cache Server
+
 [![Build Status](https://travis-ci.org/naver/arcus-memcached.svg?branch=develop)](https://travis-ci.org/naver/arcus-memcached)
 [![Coverage Status](https://coveralls.io/repos/github/naver/arcus-memcached/badge.svg?branch=develop)](https://coveralls.io/github/naver/arcus-memcached)
 
@@ -38,18 +39,18 @@ Other Linux distributions have not been tested.
 **Dependencies**
 
 arcus-memcached has the following dependencies. Make sure to install them.
-- [libevent](http://libevent.org/) - An event notification library
-- [arcus-zookeeper](https://github.com/naver/arcus-zookeeper) - Zookeeper c library with Arcus modification
+* [libevent](http://libevent.org/) - An event notification library
+* [arcus-zookeeper](https://github.com/naver/arcus-zookeeper) - Zookeeper c library with Arcus modification
 
 **Compile**
 
 To build arcus-memcached from the git-cloned source code,
 
 ```
-$ ./config/autorun.sh
-$ ./configure [--with-libevent=<libevent_install_path>]
-$ make
-$ make install
+./config/autorun.sh
+./configure [--with-libevent=<libevent_install_path>]
+make
+make install
 ```
 
 The use of ZooKeeper based clustering is optional.
@@ -69,22 +70,24 @@ Only the default engine provides all of the above Arcus functionalities.
 To start Arcus cache server with the default engine, run the following command line with non-root user.
 
 ```
-$ <arcus_install_path>/bin/memcached -m 4000 -p 11211 -E <arcus_install_path>/lib/default_engine.so
+<arcus_install_path>/bin/memcached -m 4000 -p 11211 -E <arcus_install_path>/lib/default_engine.so
 ```
 
 Important start options are here.
-- To enable Zookeeper-based clustering, use `-z` to specify the Zookeeper ensemble ip:port list.
-- The scrub command is provided as an ASCII command extension.
+* To enable Zookeeper-based clustering, use `-z` to specify the Zookeeper ensemble ip:port list.
+* The scrub command is provided as an ASCII command extension.
   To use the command, use `-X` to specify the location of ascii_scrub.so library.
 
 To see details on arcus-memcached start options, run memcached with -h option like below.
+
 ```
-$ <arcus_install_path>/bin/memcached -h
+<arcus_install_path>/bin/memcached -h
 ```
 
 To stop the running Arcus cache server, use kill command like below.
+
 ```
-$ kill -INT <pid>
+kill -INT <pid>
 ```
 
 ## ASCII Protocol
@@ -101,7 +104,7 @@ refer to [Arcus telnet interface guide](doc/ap01-arcus-telnet-interface.md).
 
 If you find a bug, please report it via the GitHub issues page.
 
-https://github.com/naver/arcus-memcached/issues
+<https://github.com/naver/arcus-memcached/issues>
 
 ## Arcus Contributors
 
@@ -117,7 +120,7 @@ Chang Song <chang.song@navercorp.com>
 
 ## License
 
-Licensed under the Apache License, Version 2.0: http://www.apache.org/licenses/LICENSE-2.0
+Licensed under the Apache License, Version 2.0: <http://www.apache.org/licenses/LICENSE-2.0>
 
 ## Patents
 
